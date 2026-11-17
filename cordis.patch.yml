@@ -1,0 +1,38 @@
+# Rows this bundle contributes.
+#
+# Why this file restates the whole `presets` table instead of appending one key:
+# the loader applies a patch override as a whole-value assignment
+# (`for (const [key, value] of Object.entries(overrides)) target[key] = value`
+# in cordis-plugin-include/src/patch.ts), so `config.presets` is REPLACED, never
+# deep-merged. A row that listed only `codex-autoreview` would therefore erase
+# the built-in presets. Restating every entry is the only correct form.
+#
+# Why the built-in entries carry no `name`: the client localizes a preset only
+# when the host-supplied name still equals the preset key
+# (`displayPermissionPreset` compares `name === value`), falling back to
+# `displayPresetName(name)`. Omitting `name` leaves the key in place, which is
+# what selects the 仅可查看 / 工作区内修改 / 完全权限 translations. The new preset
+# omits `name` for the same reason: its key renders as "Codex Autoreview".
+#
+# Knob values below are copied verbatim from @deepseek-ai/dsh-base, so the three
+# built-in presets keep exactly their existing behaviour.
+- insert:
+    - id: codex-style-autoreview
+      name: '@local/codex-style-autoreview'
+
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+      codex-autoreview:
+        sandbox: workspace-write
+        approval: ask

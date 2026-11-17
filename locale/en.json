@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex-style auto-review",
+    "description": "Keeps the workspace-write sandbox and reviews each request to run one call outside it, judging whether the action is dangerous rather than whether the user authorized it. Denials return actionable feedback instead of an approval prompt."
+  }
+}
