@@ -54,6 +54,7 @@ function makeContext(options = {}) {
   const listeners = new Map();
   const logs = [];
   const replies = options.replies ?? [reply('{"decision":"allow","risk":"low","rationale":"ordinary work"}')];
+  const requests = [];
   let callIndex = 0;
   const logger = {
     debug: (...args) => logs.push(['debug', ...args]),
@@ -75,7 +76,8 @@ function makeContext(options = {}) {
       }
       if (name === 'llm') {
         return {
-          stream() {
+          stream(request) {
+            requests.push(request);
             const chunks = replies[Math.min(callIndex, replies.length - 1)];
             callIndex += 1;
             return (async function* emit() {
@@ -105,7 +107,7 @@ function makeContext(options = {}) {
   };
   apply(ctx, options.config ?? {});
   const first = (name) => (listeners.get(name) ?? [])[0];
-  return { ctx, logs, listener: first, reviews: () => callIndex };
+  return { ctx, logs, listener: first, reviews: () => callIndex, requests };
 }
 
 /** One tool execution view for pre-execute. */
@@ -291,6 +293,21 @@ await checkAsync('a denial at the approval step is answered as rejected', async 
   assert(outcome === 'rejected', `expected rejected, got ${outcome}`);
 });
 
+await checkAsync('a reviewer fault at the approval step never claims the user refused', async () => {
+  const { listener, reviews, logs } = makeContext({
+    // A protocol violation on every attempt: a reviewer fault, not a judgement.
+    replies: [reply('I cannot decide that.')],
+    config: { maxAttempts: 2 },
+  });
+  const outcome = await listener('approval/request')(request(), async () => 'allowed-once');
+  // `rejected` would surface to the model as "the user rejected escalating this
+  // command", which would be a false statement about the user.
+  assert(outcome === 'unavailable', `expected unavailable, got ${outcome}`);
+  assert(reviews() === 2, `expected the full retry budget, got ${reviews()}`);
+  assert(logs.some(([, message]) => message === 'codex-autoreview: review failed at the approval step; answering unavailable instead of a denial'),
+    'the fault was not audited at the boundary');
+});
+
 await checkAsync('the answerer resolves the real pending call by callId', async () => {
   const session = {
     id: 's1',
@@ -372,6 +389,40 @@ await checkAsync('a persistent protocol violation is reported as a plugin fault'
   const { listener } = makeContext({ replies: [reply('I cannot decide that.')], config: { maxAttempts: 2 } });
   const decision = await listener('tools/pre-execute')(exec(), async () => ({ kind: 'allow' }));
   assert(decision.info?.code === 'CODEX_AUTOREVIEW_FAILED', `wrong outcome ${JSON.stringify(decision.info)}`);
+});
+
+await checkAsync('the reviewer call is classified with this plugin own purpose', async () => {
+  const { listener, requests } = makeContext();
+  await listener('tools/pre-execute')(exec(), async () => ({ kind: 'allow' }));
+  assert(requests.length === 1, `expected 1 request, got ${requests.length}`);
+  // The official plugin uses 'auto-review'; an audit trail that cannot tell the
+  // two reviewers apart is worth little, so this must stay a distinct key.
+  assert(requests[0].purpose === 'codex-autoreview', `wrong purpose ${requests[0].purpose}`);
+});
+
+await checkAsync('every retryable provider code the runtime marks is retried', async () => {
+  for (const code of ['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE', 'MALFORMED_RESPONSE', 'STREAM_CLOSED']) {
+    const { listener, reviews } = makeContext({
+      replies: [failureChunks(code, 'transient'), reply('{"decision":"allow","risk":"low","rationale":"fine"}')],
+      config: { maxAttempts: 3 },
+    });
+    let delegated = false;
+    await listener('tools/pre-execute')(exec(), async () => { delegated = true; return { kind: 'allow' }; });
+    assert(delegated, `${code} was not retried`);
+    assert(reviews() === 2, `${code} expected 2 attempts, got ${reviews()}`);
+  }
+});
+
+await checkAsync('an exhausted allowance is not retried', async () => {
+  // QUOTA is marked retryable by the runtime, but nothing this plugin does inside
+  // one approval replenishes an exhausted allowance, so it must fail immediately.
+  const { listener, reviews } = makeContext({
+    replies: [failureChunks('QUOTA', 'allowance exhausted')],
+    config: { maxAttempts: 3 },
+  });
+  const decision = await listener('tools/pre-execute')(exec(), async () => ({ kind: 'allow' }));
+  assert(decision.kind === 'deny', 'expected a deny');
+  assert(reviews() === 1, `expected 1 attempt, got ${reviews()}`);
 });
 
 await checkAsync('disabling the plugin restores pass-through', async () => {

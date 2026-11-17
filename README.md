@@ -72,7 +72,7 @@ All fields are optional and read from the bundle's `cordis.patch.yml`:
 | Field | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | Turn review off without uninstalling. |
-| `maxAttempts` | `3` | Attempts per review. Only transient provider failures and off-protocol replies are retried. |
+| `maxAttempts` | `3` | Attempts per review. Retries transient provider failures (rate limit, server, timeout, transport, empty, malformed, stream closed) and off-protocol replies; not an exhausted allowance. |
 | `historyCharBudget` | `24000` | Character budget for the retained transcript. |
 | `entryChars` | `1200` | Per-entry cap inside that transcript. |
 
@@ -87,6 +87,18 @@ denial in the log and in the model-visible feedback.
 A reviewer fault is reported to the model as `CODEX_AUTOREVIEW_FAILED` and says
 the plugin is broken; a denial is `CODEX_AUTOREVIEW_DENIED` and says the command
 was judged dangerous. The two are never conflated.
+
+The `pre-execute` entry carries that wording, because it is the only entry whose
+decision reaches the model as text. A fallback review at the approval step has a
+closed answer vocabulary (`allowed-once`, `rejected`, `cancelled`, `unavailable`)
+and cannot say "the reviewer is broken"; on a fault it answers `unavailable`
+rather than `rejected`, because `rejected` would reach the model as "the user
+rejected this command" — a false claim about the user. The fault is recorded as
+`codex-autoreview: review failed at the approval step` instead.
+
+Reviewer requests carry the auxiliary purpose `codex-autoreview`, so adapters and
+the session-log uploader can tell them apart from conversation traffic and from
+the official experimental auto-review plugin's own `auto-review` purpose.
 
 ## Requirements and limits
 

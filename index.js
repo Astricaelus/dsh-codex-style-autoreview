@@ -45,6 +45,17 @@ const FAILED_ERROR_NAME = 'CodexAutoReviewFailedError';
 const PRESET = 'codex-autoreview';
 
 /**
+ * This plugin's own auxiliary-request purpose key.
+ *
+ * The reviewer call is not a conversation step, so it carries a classification
+ * that adapters may forward as model-hidden transport metadata and that the
+ * session-log uploader attributes the request by. It is deliberately NOT the
+ * official plugin's `auto-review`: the two plugins may run side by side, and an
+ * audit trail that cannot tell their reviewer calls apart is worth little.
+ */
+const PURPOSE = 'codex-autoreview';
+
+/**
  * The reason `approveEscalation` composes:
  * `escalate sandbox to <mode>: <justification>`. The enforcing family's subject
  * noun (`command` / `operation`) appears only in the resolver's thrown error, not
@@ -193,8 +204,26 @@ class ReviewAttemptError extends Error {
   }
 }
 
-/** Provider failure codes worth another attempt; mirrors `retryableCodes` defaults. */
-const RETRYABLE_FAILURE_CODES = new Set(['RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT', 'EMPTY_RESPONSE']);
+/**
+ * Provider failure codes worth another attempt.
+ *
+ * Every code the LLM runtime marks `retryChoice` is here except `QUOTA`: that
+ * one means the account is out of allowance, and nothing this plugin does inside
+ * a single approval can replenish it, so retrying only delays the failure.
+ * `MALFORMED_RESPONSE` and `STREAM_CLOSED` are included because a one-shot
+ * auxiliary request has no other layer to recover them — unlike a conversation
+ * request, whose retry policy `llm-retry` owns, a reviewer call is retried only
+ * where this loop decides to.
+ */
+const RETRYABLE_FAILURE_CODES = new Set([
+  'RATE_LIMIT',
+  'SERVER',
+  'TIMEOUT',
+  'TRANSPORT',
+  'EMPTY_RESPONSE',
+  'MALFORMED_RESPONSE',
+  'STREAM_CLOSED',
+]);
 
 /**
  * Collect one model reply's text from the chunk stream.
@@ -318,6 +347,9 @@ export function apply(ctx, config) {
           messages,
           temperature: 0,
           sessionId: session?.id,
+          // Classify the auxiliary call so adapters and the session-log uploader
+          // can tell a review apart from conversation traffic.
+          purpose: PURPOSE,
           ...signal === undefined ? {} : { signal },
         }));
         // A reply that breaks the closed protocol is retried like a transient
@@ -502,7 +534,26 @@ export function apply(ctx, config) {
         activeReviews.delete(completed.promise);
       }
       if (lifecycle.signal.aborted) return 'cancelled';
-      if (!result.ok) return result.code === 'ABORTED' ? 'cancelled' : 'rejected';
+      if (!result.ok) {
+        if (result.code === 'ABORTED') return 'cancelled';
+        // The answerer vocabulary is closed (`allowed-once | rejected |
+        // cancelled | unavailable`) and has no "the reviewer itself failed"
+        // outcome; throwing is normalized to `unavailable` as well. Answer
+        // `unavailable` rather than `rejected`, because `rejected` reaches the
+        // model as "the user rejected escalating this command" — a false
+        // statement about the user — while `unavailable` only says that no
+        // approval channel answered, which is true. The explicit malfunction
+        // wording exists only on the `tools/pre-execute` entry, which can return
+        // text; this entry reached here precisely because no such decision was
+        // cached, so the audit record below is what keeps the fault visible.
+        log('error', 'review failed at the approval step; answering unavailable instead of a denial', {
+          callId: req.callId,
+          tool: action.toolName,
+          code: result.code,
+          error: result.message,
+        });
+        return 'unavailable';
+      }
       return result.decision.decision === 'allow' ? 'allowed-once' : 'rejected';
     }, { prepend: true });
     yield offApproval;
